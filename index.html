@@ -1568,7 +1568,14 @@ function buildResults() {
 // ════════════════════════════════════════════════════
 //   LOUD ALARM — Web Audio API (max harshness)
 // ════════════════════════════════════════════════════
-function playAlarm() {
+function stopAlarm() {
+  try {
+    alarmNodes.forEach(n => { try { n.stop(0); } catch(e){} });
+    alarmNodes = [];
+    if (alarmCtx) { alarmCtx.close().catch(()=>{}); alarmCtx = null; }
+  } catch(e) {}
+}
+ function playAlarm() {
   // 1. BYPASS PROTEKSI: Menghentikan instance sebelumnya agar memori tidak bocor,
   // namun memastikan eksekusi baru berjalan pada prioritas utas (thread) tertinggi.
   stopAlarm();
